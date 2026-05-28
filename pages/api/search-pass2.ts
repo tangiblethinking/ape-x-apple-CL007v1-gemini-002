@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { callAI, extractJSON, AIProvider, GEMINI_JOB_ARRAY_SCHEMA } from '../../lib/ai-providers';
 import { getClaudeSearchPrompt } from '../../lib/claude-instructions';
+import { getGeminiSearchPrompt } from '../../lib/gemini-instructions';
 
 interface TrustedResult {
   title: string;
@@ -23,6 +24,7 @@ interface VerifiedAggregator extends AggregatorResult {
   verified: boolean;
 }
 
+// ── JSON repair: close unclosed arrays/objects from truncated AI output ──
 function repairJson(raw: string): string {
   let s = raw.trim();
   s = s.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -48,55 +50,6 @@ function repairJson(raw: string): string {
   return '[]';
 }
 
-// ── Gemini-only: build a clean bounded prompt from raw search results ──────
-// Does NOT send userInstructions to Gemini. Gemini cannot fetch URLs and
-// fails the Layer 1/2 audit protocol written for Claude. Instead give Gemini
-// only: titles, a brief profile line, and the output schema via GEMINI_JOB_ARRAY_SCHEMA.
-// This mirrors exactly what makes the job bot's Gemini calls succeed.
-function buildGeminiPrompt(
-  titlesSearched: string[],
-  instructions: string,
-  today: string
-): string {
-  // Extract candidate name and most recent role from instructions for context
-  const nameMatch = instructions.match(/for\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
-  const roleMatch = instructions.match(/MOST RECENT ROLE:\s*(.+)/);
-  const salaryMatch = instructions.match(/SALARY TARGET:\s*(.+)/);
-
-  const candidateLine = [
-    nameMatch ? `Candidate: ${nameMatch[1]}` : '',
-    roleMatch ? `Most recent role: ${roleMatch[1].trim()}` : '',
-    salaryMatch ? `Salary target: ${salaryMatch[1].trim()}` : '',
-  ].filter(Boolean).join(' | ');
-
-  const titlesLine = titlesSearched.length > 0
-    ? titlesSearched.join(', ')
-    : 'roles matching the candidate profile';
-
-  return `You are a job search assistant. Today is ${today}.
-
-TARGET TITLES: ${titlesLine}
-${candidateLine}
-
-TASK: Evaluate each job search result below and return a JSON array of job card objects.
-
-INPUT FORMAT: Each line is prefixed [ATS], [AGG-V], or [AGG-U] followed by Company|Title|URL|Snippet.
-
-RULES:
-1. INCLUDE the job if the title matches or is a close variant of the TARGET TITLES above.
-2. INCLUDE the job if location is unspecified, remote, or hybrid — treat unspecified as remote-eligible.
-3. EXCLUDE only if the title is clearly unrelated, or the posting is obviously not a real job (press release, generic careers page with no specific role).
-4. Assign rating: 9-10 near-perfect title match | 7-8 strong variant | 5-6 adjacent role | below 5 exclude.
-5. Set isRemote/isHybrid/isOnsite based on snippet content. Default isRemote=true when unspecified.
-
-auditLabel values:
-- [ATS] → "✓ Direct ATS Verified ${today}"
-- [AGG-V] → "✓ Company Domain Verified ${today}"
-- [AGG-U] → "✓ Aggregator Listed ${today}"
-
-Output ONLY the JSON array. No markdown. No explanation.`;
-}
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
@@ -115,44 +68,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-  // ── FIX 1: Parallel aggregator verification, capped at 10 ──────────────
-  // Was: sequential for-loop over all aggregators (~47 × ~800ms = ~38s → timeout)
-  // Now: Promise.all over top 10 → ~3s total
-  const AGGREGATOR_DOMAINS = [
-    'linkedin.com', 'indeed.com', 'ziprecruiter.com', 'glassdoor.com',
-    'monster.com', 'careerbuilder.com', 'dice.com', 'builtin.com',
-    'simplyhired.com', 'snagajob.com', 'flexjobs.com', 'talent.com', 'google.com',
-  ];
-
-  const aggregatorsCapped = (aggregators as AggregatorResult[])
-    .filter(a => a.company && a.company !== 'Unknown')
-    .slice(0, 10);
-
-  const verifiedAggregators: VerifiedAggregator[] = await Promise.all(
-    aggregatorsCapped.map(async (agg) => {
-      try {
-        const verifyQuery = `"${agg.title}" "${agg.company}" careers apply job`;
-        const serperRes = await fetch('https://google.serper.dev/search', {
-          method: 'POST',
-          headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q: verifyQuery, num: 5 }),
-        });
-        if (!serperRes.ok) return { ...agg, verified: false };
+  // Verify aggregator results via Serper
+  const verifiedAggregators: VerifiedAggregator[] = [];
+  for (const agg of (aggregators as AggregatorResult[])) {
+    if (!agg.company || agg.company === 'Unknown') {
+      verifiedAggregators.push({ ...agg, verified: false }); continue;
+    }
+    try {
+      const verifyQuery = `"${agg.title}" "${agg.company}" careers apply job`;
+      const serperRes = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: verifyQuery, num: 5 }),
+      });
+      if (serperRes.ok) {
         const data = await serperRes.json();
         const results = (data.organic || []) as { link: string; title: string }[];
+        const aggregatorDomains = ['linkedin.com','indeed.com','ziprecruiter.com','glassdoor.com',
+          'monster.com','careerbuilder.com','dice.com','builtin.com','simplyhired.com',
+          'snagajob.com','flexjobs.com','talent.com','google.com'];
         const companyResult = results.find(r => {
-          try { return !AGGREGATOR_DOMAINS.some(d => new URL(r.link).hostname.toLowerCase().includes(d)); }
+          try { return !aggregatorDomains.some(d => new URL(r.link).hostname.toLowerCase().includes(d)); }
           catch { return false; }
         });
-        return companyResult
+        verifiedAggregators.push(companyResult
           ? { ...agg, verified: true, verified_url: companyResult.link }
-          : { ...agg, verified: false };
-      } catch {
-        return { ...agg, verified: false };
+          : { ...agg, verified: false });
+      } else {
+        verifiedAggregators.push({ ...agg, verified: false });
       }
-    })
-  );
-  // ────────────────────────────────────────────────────────────────────────
+    } catch {
+      verifiedAggregators.push({ ...agg, verified: false });
+    }
+  }
 
   const trustedText = (trusted as TrustedResult[]).map(r =>
     `[ATS]${r.company}|${r.title}|${r.url}|${r.snippet}`).join('\n');
@@ -165,15 +113,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const finalInstructions = specialInstructions
     ? `${instructions}\n\nSPECIAL:\n${specialInstructions}` : instructions;
 
-  // ── FIX 2: Gemini gets a clean bounded prompt, not the full userInstructions ──
-  // Claude gets the full instructions as before (unchanged, working).
-  // Gemini gets only titles + profile line + simple include/exclude rules.
-  // This mirrors the job bot pattern: Gemini never sees Layer 1/2 fetch-audit logic.
   const systemPrompt = provider === 'gemini'
-    ? buildGeminiPrompt(titlesSearched || [], instructions, today)
-    : getClaudeSearchPrompt(finalInstructions, specialInstructions || null, titlesSearched || [], today);
+    ? getGeminiSearchPrompt(instructions, specialInstructions || null, titlesSearched || [], today)
+    : getClaudeSearchPrompt(instructions, specialInstructions || null, titlesSearched || [], today);
 
   try {
+    // Only attach a responseSchema for Gemini. Claude returns JSON via prompt;
+    // attaching a schema to the Gemini call constrains its output to the
+    // correct job-array shape (previously misrouted to profile schema).
     const aiResponse = await callAI(
       provider,
       apiKey,

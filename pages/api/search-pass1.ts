@@ -5,12 +5,8 @@ import { extractStateCodes, validateLocationInput } from '../../lib/location-val
 function extractTitles(instructions: string): string[] {
   const match = instructions.match(/TARGET TITLES:\s*(.+)/);
   if (!match) return [];
-  const raw = match[1].trim();
-  if (raw === '[Complete Setup Wizard to configure]') return [];
-  // Support both pipe-delimited (new) and comma-delimited (legacy) formats
-  const delimiter = raw.includes(' | ') ? ' | ' : ',';
-  return raw
-    .split(delimiter)
+  return match[1]
+    .split(',')
     .map(t => t.trim())
     .filter(t => t && t !== '[Complete Setup Wizard to configure]');
 }

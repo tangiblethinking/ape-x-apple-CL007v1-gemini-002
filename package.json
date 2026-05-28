@@ -8,7 +8,6 @@
     "start": "next start"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
     "formidable": "^3.5.1",
     "lucide-react": "^1.14.0",
     "mammoth": "^1.12.0",
