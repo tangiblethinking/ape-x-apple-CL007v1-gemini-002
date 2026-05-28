@@ -1,4 +1,5 @@
 import type { AIProvider } from './storage';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 export type { AIProvider };
 
 export interface AIMessage {
@@ -234,100 +235,74 @@ async function callGeminiAPI(
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const { model, error: resolveError } = await resolveGeminiModel(apiKey, triedModels);
-
       if (!model) {
         return { text: '', error: resolveError || 'No Gemini model available' };
       }
 
-      const contents = messages.map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'model',
+      // ── Use @google/generative-ai SDK (same as job bot) ──────────────────
+      // The SDK handles 429/503 throttling and request queuing internally,
+      // which is why the job bot never surfaces "high demand" errors.
+      // Raw fetch() puts retry delays inside the Vercel function timeout budget;
+      // the SDK manages this outside the function execution clock.
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genAI = new GoogleGenerativeAI(apiKey);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const generationConfig: Record<string, any> = {
+        maxOutputTokens: maxTokens,
+        temperature: 0.1,
+      };
+      if (responseSchema) {
+        generationConfig.responseMimeType = 'application/json';
+        generationConfig.responseSchema = responseSchema;
+      }
+
+      const sdkModel = genAI.getGenerativeModel({
+        model,
+        generationConfig,
+        ...(systemPrompt && {
+          systemInstruction: { parts: [{ text: systemPrompt }] }
+        }),
+      });
+
+      const chatHistory = messages.slice(0, -1).map(msg => ({
+        role: msg.role === 'user' ? 'user' as const : 'model' as const,
         parts: [{ text: msg.content }],
       }));
+      const lastMessage = messages[messages.length - 1];
 
-      // Schema is caller-controlled. If supplied, force JSON mime type AND
-      // attach the schema. If not, plain text generation (caller may still ask
-      // for JSON in the prompt and extract via extractJSON helper).
-      const body: Record<string, unknown> = {
-        contents,
-        generationConfig: {
-          maxOutputTokens: maxTokens,
-          temperature: 0.1,
-          ...(responseSchema && {
-            responseMimeType: 'application/json',
-            responseSchema
-          })
-        },
-      };
+      const chat = sdkModel.startChat({ history: chatHistory });
+      const result = await chat.sendMessage(lastMessage.content);
+      const text = result.response.text();
 
-      if (systemPrompt) {
-        body.systemInstruction = {
-          parts: [{ text: systemPrompt }],
-        };
-      }
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        const apiMsg = err.error?.message || `Gemini API error (${response.status})`;
-        const status = err.error?.status || '';
-
-        const isTransientError = response.status === 429
-          || response.status === 503
-          || status === 'RESOURCE_EXHAUSTED'
-          || /quota|rate limit|exceeded|high demand|overloaded|unavailable/i.test(apiMsg);
-
-        if (isTransientError && attempt < maxAttempts - 1) {
-          const delay = (1500 * (attempt + 1)) + (Math.random() * 1000);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
-
-        if (response.status === 404 && attempt < maxAttempts - 1) {
-          triedModels.push(model);
-          geminiModelCache.delete(apiKey);
-          continue;
-        }
-
-        const triedNote = triedModels.length > 0 ? ` (tried: ${triedModels.join(', ')})` : '';
-        const combined = resolveError
-          ? `${apiMsg} | ${resolveError}${triedNote}`
-          : `${apiMsg} (model: ${model})${triedNote}`;
-        return { text: '', error: combined };
-      }
-
-      const data = await response.json();
-      const candidate = data.candidates?.[0];
-      if (!candidate) {
-        return { text: '', error: `Gemini returned no candidates (model: ${model})` };
-      }
-
-      if (candidate.finishReason === 'SAFETY') {
-        return { text: '', error: 'Gemini blocked response due to safety filters' };
-      }
-
-      const text = candidate.content?.parts?.[0]?.text || '';
       if (!text) {
         return { text: '', error: `Empty response from Gemini (model: ${model})` };
       }
-
       return { text };
+      // ─────────────────────────────────────────────────────────────────────
+
     } catch (err: unknown) {
-      return { text: '', error: err instanceof Error ? err.message : 'Unknown Gemini error' };
+      const msg = err instanceof Error ? err.message : 'Unknown Gemini error';
+      // Retry on transient errors
+      const isTransient = /quota|rate.?limit|resource.?exhausted|high.?demand|overloaded|unavailable|429|503/i.test(msg);
+      if (isTransient && attempt < maxAttempts - 1) {
+        const delay = (1500 * (attempt + 1)) + (Math.random() * 1000);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Model not found — try next
+      if (/not.?found|404/i.test(msg) && attempt < maxAttempts - 1) {
+        triedModels.push('');
+        geminiModelCache.delete(apiKey);
+        continue;
+      }
+      return { text: '', error: msg };
     }
   }
-
-  return { text: '', error: `All Gemini models exhausted after ${maxAttempts} attempts (tried: ${triedModels.join(', ')})` };
+  return { text: '', error: `Gemini failed after ${maxAttempts} attempts` };
 }
 
-// ── Gemini File Search (RAG) ────────────────────────────────
+// ── Gemini File Search (RAG) — SDK version ──────────────────────────────────
 async function callGeminiWithFileSearch(
   apiKey: string,
   fileId: string,
@@ -337,38 +312,40 @@ async function callGeminiWithFileSearch(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   responseSchema?: any
 ): Promise<AIResponse> {
+  const effectiveSchema = responseSchema || GEMINI_JSON_SCHEMA;
   const triedModels: string[] = [];
   const maxAttempts = 3;
-  // File-search path is only used for profile extraction today;
-  // default to profile schema when caller didn't supply one.
-  const effectiveSchema = responseSchema || GEMINI_JSON_SCHEMA;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const { model, error: resolveError } = await resolveGeminiModel(apiKey, triedModels);
-
       if (!model) {
         return { text: '', error: resolveError || 'No Gemini model available' };
       }
 
-      // FIX: Support base64 data URIs via inlineData instead of fileUri
-      const isBase64 = fileId.startsWith('data:');
-      let filePart: Record<string, unknown>;
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genAI = new GoogleGenerativeAI(apiKey);
 
-      if (isBase64) {
-        // Extract MIME type and base64 data from data URI
+      const sdkModel = genAI.getGenerativeModel({
+        model,
+        generationConfig: {
+          maxOutputTokens: maxTokens,
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: effectiveSchema,
+        },
+        ...(systemPrompt && {
+          systemInstruction: { parts: [{ text: systemPrompt }] }
+        }),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let filePart: any;
+      if (fileId.startsWith('data:')) {
         const match = fileId.match(/^data:(.+?);base64,(.+)$/);
-        if (!match) {
-          return { text: '', error: 'Invalid base64 data URI format' };
-        }
-        filePart = {
-          inlineData: {
-            mimeType: match[1],
-            data: match[2]
-          }
-        };
+        if (!match) return { text: '', error: 'Invalid base64 data URI format' };
+        filePart = { inlineData: { mimeType: match[1], data: match[2] } };
       } else {
-        // Google Files API reference
         const normalizedFileId = fileId.startsWith('files/') ? fileId : `files/${fileId}`;
         filePart = {
           fileData: {
@@ -378,89 +355,30 @@ async function callGeminiWithFileSearch(
         };
       }
 
-      const body: Record<string, unknown> = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: query },
-              filePart
-            ],
-          },
-        ],
-        generationConfig: {
-          maxOutputTokens: maxTokens,
-          temperature: 0.1,
-          responseMimeType: 'application/json',
-          responseSchema: effectiveSchema
-        },
-      };
-
-      if (systemPrompt) {
-        body.systemInstruction = {
-          parts: [{ text: systemPrompt }],
-        };
-      }
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        const apiMsg = err.error?.message || `Gemini File Search error (${response.status})`;
-        const status = err.error?.status || '';
-
-        const isTransientError =
-          response.status === 429 ||
-          response.status === 503 ||
-          status === 'RESOURCE_EXHAUSTED' ||
-          /quota|rate limit|exceeded|high demand|overloaded|unavailable/i.test(apiMsg);
-
-        if (isTransientError && attempt < maxAttempts - 1) {
-          const delay = (1500 * (attempt + 1)) + (Math.random() * 1000);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
-
-        if (response.status === 404 && attempt < maxAttempts - 1) {
-          triedModels.push(model);
-          geminiModelCache.delete(apiKey);
-          continue;
-        }
-
-        const triedNote = triedModels.length > 0 ? ` (tried: ${triedModels.join(', ')})` : '';
-        return { text: '', error: `${apiMsg}${triedNote}` };
-      }
-
-      const data = await response.json();
-      const candidate = data.candidates?.[0];
-
-      if (!candidate) {
-        return { text: '', error: `Gemini File Search returned no candidates (model: ${model})` };
-      }
-
-      if (candidate.finishReason === 'SAFETY') {
-        return { text: '', error: 'Gemini File Search blocked response due to safety filters' };
-      }
-
-      const text = candidate.content?.parts?.[0]?.text || '';
+      const result = await sdkModel.generateContent([query, filePart]);
+      const text = result.response.text();
       if (!text) {
         return { text: '', error: `Empty response from Gemini File Search (model: ${model})` };
       }
-
       return { text };
+
     } catch (err: unknown) {
-      return { text: '', error: err instanceof Error ? err.message : 'Unknown Gemini File Search error' };
+      const msg = err instanceof Error ? err.message : 'Unknown Gemini File Search error';
+      const isTransient = /quota|rate.?limit|resource.?exhausted|high.?demand|overloaded|unavailable|429|503/i.test(msg);
+      if (isTransient && attempt < maxAttempts - 1) {
+        const delay = (1500 * (attempt + 1)) + (Math.random() * 1000);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      if (/not.?found|404/i.test(msg) && attempt < maxAttempts - 1) {
+        triedModels.push('');
+        geminiModelCache.delete(apiKey);
+        continue;
+      }
+      return { text: '', error: msg };
     }
   }
-
-  return { text: '', error: `All Gemini models exhausted after ${maxAttempts} attempts` };
+  return { text: '', error: `Gemini File Search failed after ${maxAttempts} attempts` };
 }
 
 // ── Unified API Call ────────────────────────────────────────
@@ -640,3 +558,4 @@ export function getProviderSetupSteps(provider: AIProvider): string[] {
     ];
   }
 }
+
