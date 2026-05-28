@@ -378,7 +378,7 @@ function WelcomeModal({onBegin,onSkip}:{onBegin:()=>void;onSkip:()=>void;}) {
           </div>
           <div style={{marginTop:24}}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/ape-x-full-logo.png" alt="Ape X" style={{width:'100%',maxWidth:320,height:'auto',maxHeight:220,objectFit:'contain',display:'block',margin:'0 auto',opacity:0.85}}/>
+            <img src="/ape/ape-x-full-logo.png" alt="Ape X" style={{width:'100%',maxWidth:320,height:'auto',maxHeight:220,objectFit:'contain',display:'block',margin:'0 auto',opacity:0.85}}/>
           </div>
         </div>
       </div>
@@ -2467,7 +2467,7 @@ export default function Home() {
           <div style={{marginRight:14,display:'flex',alignItems:'center',gap:8}}>
             <div style={{width:28,height:28,borderRadius:10,background:'linear-gradient(135deg,#007AFF,#5856D6)',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 2px 8px rgba(0,122,255,0.3)',overflow:'hidden'}}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ape-x-icon-logo.png" alt="Ape X" style={{width:'100%',height:'100%',objectFit:'contain'}}/>
+              <img src="/ape/ape-x-icon-logo.png" alt="Ape X" style={{width:'100%',height:'100%',objectFit:'contain'}}/>
             </div>
             <span style={{fontSize:15,fontWeight:700,letterSpacing:'-0.02em',color:'#000'}}>Ape X</span>
           </div>
@@ -2567,7 +2567,7 @@ export default function Home() {
                   <button onClick={()=>setShowWizard(true)} style={{padding:'11px 24px',background:'#007AFF',color:'#fff',border:'none',borderRadius:50,cursor:'pointer',fontWeight:600,fontSize:14,marginBottom:24}}>Run Search Wizard</button>
                 </div>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/ape-x-full-logo.png" alt="Ape X" style={{width:'100%',maxWidth:200,height:'auto',objectFit:'contain'}}/>
+                <img src="/ape/ape-x-full-logo.png" alt="Ape X" style={{width:'100%',maxWidth:200,height:'auto',objectFit:'contain'}}/>
               </div>
             ):(
               <>

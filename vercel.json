@@ -1,13 +1,9 @@
 {
   "functions": {
-    "pages/api/parse-resume.ts": {
-      "maxDuration": 30
-    },
-    "pages/api/parse-resume-base64.ts": {
-      "maxDuration": 30
-    },
-    "pages/api/parse-simple.ts": {
-      "maxDuration": 30
-    }
+    "pages/api/parse-resume.ts": { "maxDuration": 30 },
+    "pages/api/parse-resume-base64.ts": { "maxDuration": 30 },
+    "pages/api/parse-simple.ts": { "maxDuration": 30 },
+    "pages/api/search-pass1.ts": { "maxDuration": 30 },
+    "pages/api/search-pass2.ts": { "maxDuration": 30 }
   }
 }
