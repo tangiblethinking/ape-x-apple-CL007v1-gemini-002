@@ -68,39 +68,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-  // Verify aggregator results via Serper — parallel, capped at 10 to avoid timeout
-  const AGGREGATOR_DOMAINS = ['linkedin.com','indeed.com','ziprecruiter.com','glassdoor.com',
-    'monster.com','careerbuilder.com','dice.com','builtin.com','simplyhired.com',
-    'snagajob.com','flexjobs.com','talent.com','google.com'];
-
-  const aggregatorsCapped = (aggregators as AggregatorResult[])
-    .filter(a => a.company && a.company !== 'Unknown')
-    .slice(0, 10);
-
-  const verifiedAggregators: VerifiedAggregator[] = await Promise.all(
-    aggregatorsCapped.map(async (agg) => {
-      try {
-        const verifyQuery = `"${agg.title}" "${agg.company}" careers apply job`;
-        const serperRes = await fetch('https://google.serper.dev/search', {
-          method: 'POST',
-          headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ q: verifyQuery, num: 5 }),
-        });
-        if (!serperRes.ok) return { ...agg, verified: false };
-        const data = await serperRes.json();
-        const results = (data.organic || []) as { link: string; title: string }[];
-        const companyResult = results.find(r => {
-          try { return !AGGREGATOR_DOMAINS.some(d => new URL(r.link).hostname.toLowerCase().includes(d)); }
-          catch { return false; }
-        });
-        return companyResult
-          ? { ...agg, verified: true, verified_url: companyResult.link }
-          : { ...agg, verified: false };
-      } catch {
-        return { ...agg, verified: false };
-      }
-    })
-  );
+  // Skip aggregator Serper verification — keeps pass2 under Vercel 10s limit.
+  // Trusted ATS results (greenhouse.io, lever.co etc) are passed directly to Claude.
+  // Aggregators are passed as unverified — Claude applies its own audit via instructions.
+  const verifiedAggregators: VerifiedAggregator[] = (aggregators as AggregatorResult[])
+    .slice(0, 15)
+    .map(agg => ({ ...agg, verified: false }));
 
   const trustedText = (trusted as TrustedResult[]).map(r =>
     `[ATS]${r.company}|${r.title}|${r.url}|${r.snippet}`).join('\n');
