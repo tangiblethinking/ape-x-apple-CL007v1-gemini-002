@@ -260,9 +260,7 @@ async function callGeminiAPI(
       const sdkModel = genAI.getGenerativeModel({
         model,
         generationConfig,
-        ...(systemPrompt && {
-          systemInstruction: { parts: [{ text: systemPrompt }] }
-        }),
+        ...(systemPrompt && { systemInstruction: systemPrompt }),
       });
 
       const chatHistory = messages.slice(0, -1).map(msg => ({
@@ -334,9 +332,7 @@ async function callGeminiWithFileSearch(
           responseMimeType: 'application/json',
           responseSchema: effectiveSchema,
         },
-        ...(systemPrompt && {
-          systemInstruction: { parts: [{ text: systemPrompt }] }
-        }),
+        ...(systemPrompt && { systemInstruction: systemPrompt }),
       });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
