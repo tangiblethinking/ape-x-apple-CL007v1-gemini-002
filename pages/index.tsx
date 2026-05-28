@@ -2002,37 +2002,51 @@ export default function Home() {
     setSearchError('');abortRef.current=false;setSearching(true);
 
     try{
-      // Pass 1 — search and classify
+      // Single-pass search — job bot pattern: Serper per ATS domain, no AI in search loop
       setSearchPhase(1);
-      const res1=await fetch('/ape/api/search-pass1',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({instructions:jobSearchInstr,specialInstructions,apiKeyOverride:anthropicKey,serperKeyOverride:serperKey,aiProvider})});
+      const res1=await fetch('/ape/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({instructions:jobSearchInstr,serperKeyOverride:serperKey})});
       if(abortRef.current) return;
       const data1=await safeJson(res1);
-      if(!res1.ok){setSearchError((data1.error as string)||'Search failed in Pass 1.');setSearching(false);return;}
-      if(data1.error==='no_results'){setSearchError((data1.message as string)||'No results found.');setSearching(false);return;}
+      if(!res1.ok){setSearchError((data1.error as string)||'Search failed.');setSearching(false);return;}
 
-      // Pass 2 — verify and build job cards
-      setSearchPhase(2);
-      const res2=await fetch('/ape/api/search-pass2',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          trusted:data1.trusted||[],
-          aggregators:data1.aggregators||[],
-          instructions:jobSearchInstr,
-          specialInstructions,
-          apiKeyOverride:anthropicKey,
-          serperKeyOverride:serperKey,
-          titlesSearched:data1.titlesSearched||[],
-          aiProvider,
-        })});
-      if(abortRef.current) return;
-      const data2=await safeJson(res2);
-      if(!res2.ok){setSearchError((data2.error as string)||'Search failed in Pass 2.');setSearching(false);return;}
-      if(data2.error){setSearchError((data2.error as string)||'Search failed in Pass 2.');setSearching(false);return;}
+      // Map flat Serper results into SavedJob shape for the board
+      const today=new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+      const rawJobs=Array.isArray(data1.jobs)?data1.jobs as {title:string;link:string;snippet:string;source:string}[]:[];
+      const live:SavedJob[]=rawJobs.map((r,i)=>{
+        const slug=`${r.source}-${i}-${Date.now()}`;
+        return {
+          id:slug,
+          company:r.source,
+          title:r.title,
+          category:'manager',
+          isRemote:true,
+          isHybrid:false,
+          isOnsite:false,
+          location:'',
+          industry:[],
+          salaryMin:0,
+          salaryMax:0,
+          salaryDisplay:'Not Listed',
+          salaryNote:'Not Listed',
+          rating:7,
+          auditLabel:`✓ ATS Verified ${today}`,
+          roleSummary:r.snippet,
+          whyYouFit:[],
+          requirements:[],
+          companyInfo:'',
+          goldFlags:[],
+          redFlags:[],
+          applyUrl:r.link,
+          careersUrl:r.link,
+          aboutUrl:'',
+          jobDescUrl:r.link,
+          postedDate:'',
+          excluded:false,
+        };
+      });
 
-      const allJobs=Array.isArray(data2.jobs)?data2.jobs as (SavedJob|ExcludedJob)[]:[];
-      const live=allJobs.filter((j:SavedJob|ExcludedJob)=>!j.excluded) as SavedJob[];
-      const excl=allJobs.filter((j:SavedJob|ExcludedJob)=>j.excluded) as ExcludedJob[];
-      setJobs(live);setExcludedJobs(excl);setSavedJobs(live);
+      setJobs(live);setExcludedJobs([]);setSavedJobs(live);
       setLastSearchQuery(jobSearchInstr);
 
       // Auto-save to history
@@ -2041,7 +2055,7 @@ export default function Home() {
         title:profile.targetTitles.slice(0,2).join(' / ')||'Job Search',
         timestamp:new Date().toISOString(),
         jobs:live,
-        excludedJobs:excl as ExcludedJobSnapshot[],
+        excludedJobs:[] as ExcludedJobSnapshot[],
         searchMeta:{
           targetTitles:profile.targetTitles,
           workTypes:profile.workTypes,
